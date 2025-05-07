@@ -3,10 +3,12 @@ import subprocess
 import torch
 import random
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoModel, PreTrainedModel
-from transformers import Qwen2Tokenizer, Qwen2Model, Qwen2ForCausalLM
+from transformers import Qwen2Tokenizer, Qwen2Model, Qwen2ForCausalLM, PretrainedConfig
 import os
-
+from pathlib import Path
 import inspect
+import transformers
+transformers.logging.set_verbosity_error()
 
 
 def get_function_parameters_list(func):
@@ -32,6 +34,9 @@ def lower_case_model_name(name: str):
             new_name += "_"
         new_name += c.lower()
     return new_name
+
+def pascal_case_model_name(name: str):
+    return ''.join(list(map(lambda n: n[0].upper() + n[1:], name.split('_'))))
 
 
 def generate_moe_modeling(
@@ -142,6 +147,7 @@ __all__ = [
     "{moe_class_name}Config",
 ]
 """
+
     low_model_name = lower_case_model_name(moe_model_name)
     print(f"Generating MOE model {moe_class_name} from base model {base_model_name}...")
     moe_model_dir = f"transformers/src/transformers/models/{low_model_name}"
@@ -159,26 +165,48 @@ __all__ = [
         capture_output=True,
         text=True
     )
-    print(textwrap.indent(out.stdout, "    "), end="")
+
+    print(textwrap.indent(out.stdout + out.stderr, "    "), end="")
+
+    model_init_file = f"""
+from typing import TYPE_CHECKING
+
+from ...utils import _LazyModule
+from ...utils.import_utils import define_import_structure
+
+if TYPE_CHECKING:
+    from .configuration_{low_model_name} import *
+    from .modeling_{low_model_name} import *
+else:
+    import sys
+
+    _file = globals()["__file__"]
+    sys.modules[__name__] = _LazyModule(__name__, _file, define_import_structure(_file), module_spec=__spec__)
+"""
+    with open(f"{moe_model_dir}/__init__.py", "w") as f:
+        f.write(model_init_file)
+
     if not move_to_cwd:
         print("Generation finished!")
-        return
+        return 'transformers/models', low_model_name
     # move model to local path and replace relative imports with normal ones
-    print("Moving model to local folder...")
+    print("    Moving model to local folder...")
     import shutil
     if os.path.exists(low_model_name):
         shutil.rmtree(low_model_name)
     shutil.move(moe_model_dir, ".")
-    with open(f"{low_model_name}/modeling_{low_model_name}.py") as f:
-        modeling = f.read()
-    with open(f"{low_model_name}/modeling_{low_model_name}.py", "w") as f:
-        f.write(modeling.replace("from ...", "from transformers.").replace("from .", f"from {low_model_name}."))
 
-    with open(f"{low_model_name}/configuration_{low_model_name}.py") as f:
-        configuration = f.read()
-    with open(f"{low_model_name}/configuration_{low_model_name}.py", "w") as f:
-        f.write(configuration.replace("from ...", "from transformers.").replace("from .", f"from {low_model_name}."))
+    with open(f"{low_model_name}/__init__.py", "w") as f:
+        f.write(model_init_file)
+
+    for filename in [f"modeling_{low_model_name}.py", f"configuration_{low_model_name}.py", "__init__.py"]:
+        with open(f"{low_model_name}/{filename}") as f:
+            modeling = f.read()
+        with open(f"{low_model_name}/{filename}", "w") as f:
+            f.write(modeling.replace("from ...", "from transformers.").replace("from .", f"from {low_model_name}."))
     print("Generation finished!")
+
+    return '', low_model_name
 
 
 def load_weights_to_moe(moe_model, base_model):
@@ -197,7 +225,8 @@ def load_weights_to_moe(moe_model, base_model):
     print("Copying finished!")
 
 
-def init_and_save_custom_moe_weights(moe_class: type, base_pretrained_model_name_or_path: str,
+def init_and_save_custom_moe_weights(moe_class: type,
+                                     base_pretrained_model_name_or_path: str,
                                      moe_target_name_or_path: str):
     print("Initializing base and moe models...")
     base_model = AutoModelForCausalLM.from_pretrained(base_pretrained_model_name_or_path)
@@ -210,45 +239,113 @@ def init_and_save_custom_moe_weights(moe_class: type, base_pretrained_model_name
     print(f"Saved {moe_target_name_or_path}!")
 
 
-from qwen2_my_moe.modeling_qwen2_my_moe import Qwen2MyMoeForCausalLM, Qwen2MyMoeModel
-from qwen2_my_moe.configuration_qwen2_my_moe import Qwen2MyMoeConfig
-import time
+def load_weights_to_moe2(moe_model, base_models: list[(str, PreTrainedModel)],):
+
+    for layer_idx in moe_model.config.moe_layers_idx:
+        print(f"Copying layer {layer_idx}...")
+        for expert_idx in range(moe_model.config.num_experts):
+            print(f"   copying to expert {expert_idx}...", end='')
+            with torch.no_grad():
+                moe_model.layers[layer_idx].mlp.experts[expert_idx].load_state_dict(
+                    base_models[expert_idx].layers[layer_idx].mlp.state_dict())
+            print("done!")
+    print("Copying finished!")
+
+
+def load_donored_mlps_to_experts(moe_modeling_folder: str,
+                                 attention_donor_path: str,
+                                 mlp_donors_paths: list[str],
+                                 moe_target_name_or_path: str,
+                                 num_experts_per_tok: int,
+                                 moe_layers_idx: list[int]):
+
+    if num_experts_per_tok > len(mlp_donors_paths):
+        print(f"Error: num_experts_per_tok > num_experts (length of mlp_donors_paths).")
+        return
+
+
+    import importlib
+    from pathlib import Path
+    moe_modeling_folder = Path(moe_modeling_folder)
+    model_name = pascal_case_model_name(moe_modeling_folder.name)
+    modeling_path = str(moe_modeling_folder / f"modeling_{moe_modeling_folder.name}").replace('/', '.')
+    config_path = str(moe_modeling_folder / f"configuration_{moe_modeling_folder.name}").replace('/', '.')
+    moe_model_module = importlib.import_module(modeling_path)
+    moe_model_class: type[PreTrainedModel] = getattr(moe_model_module, f"{model_name}ForCausalLM")
+    moe_config_module = importlib.import_module(config_path)
+    moe_config_class: type[PretrainedConfig] = getattr(moe_config_module, f"{model_name}Config")
+
+    print("Initializing base and moe models...")
+    config = moe_config_class.from_pretrained(attention_donor_path)
+    config.update({
+        "num_experts": len(mlp_donors_paths),
+        "num_experts_per_tok": num_experts_per_tok,
+        "moe_layers_idx": moe_layers_idx}
+    )
+    moe_model = moe_model_class.from_pretrained(attention_donor_path, config=config)
+    base_models_map = dict()
+    base_models = []
+    for m in mlp_donors_paths:
+        if m not in base_models_map:
+            base_models_map[m] = AutoModelForCausalLM.from_pretrained(m)
+        base_models.append(base_models_map[m])
+
+    for layer_idx in moe_model.config.moe_layers_idx:
+        print(f"    Loading layer {layer_idx}...")
+        for expert_idx in range(moe_model.config.num_experts):
+            print(f"       copying {mlp_donors_paths[expert_idx]} mlp to expert {expert_idx}...", end='')
+            with torch.no_grad():
+                moe_model.model.layers[layer_idx].mlp.experts[expert_idx].load_state_dict(
+                    base_models[expert_idx].model.layers[layer_idx].mlp.state_dict())
+            print("done!")
+    print("Copying finished!")
+
+    print("Saving moe...")
+    moe_model.save_pretrained(moe_target_name_or_path, safe_serialization=True)
+    print("Saving tokenizer...")
+    AutoTokenizer.from_pretrained(attention_donor_path).save_pretrained(moe_target_name_or_path)
+    print(f"Model config and weights saved to {moe_target_name_or_path}!")
+
+def run_generator(
+    moe_name,
+    attention_donor,
+    mlp_donors,
+    num_experts_per_tok,
+    moe_layers_idx,
+    move_to_cwd
+):
+    modeling_parent_path, model_name = generate_moe_modeling(attention_donor, pascal_case_model_name(moe_name), move_to_cwd=move_to_cwd)
+    print()
+    load_donored_mlps_to_experts(
+        str(Path(modeling_parent_path) / model_name),
+        attention_donor,
+        mlp_donors,
+        moe_name + f"-{len(mlp_donors)}exp",
+        num_experts_per_tok=num_experts_per_tok,
+        moe_layers_idx=moe_layers_idx
+    )
+
+def compare_models():
+
+
 
 if __name__ == '__main__':
-    #generate_moe_modeling("Qwen2.5-0.5B-Instruct", "Qwen2MyMoe", move_to_cwd=True)
-    #exit()
+    import sys, yaml
+    with open(sys.argv[1]) as stream:
+        params = yaml.safe_load(stream)
+        run_generator(
+            params['name'],
+            params['attention'],
+            params['experts'],
+            params['num_experts_per_tok'],
+            params['moe_layers_idx'],
+            ("--move_to_cwd" in sys.argv)
+        )
 
-    init_and_save_custom_moe_weights(Qwen2MyMoeForCausalLM, "Qwen2.5-0.5B-Instruct", "Qwen2.5_My_Moe")
-    moe_model = Qwen2MyMoeForCausalLM.from_pretrained("Qwen2.5_My_Moe")
-    base_model = AutoModelForCausalLM.from_pretrained("Qwen2.5-0.5B-Instruct")
-
-    tokenizer = Qwen2Tokenizer.from_pretrained("Qwen2.5-0.5B-Instruct")
-    prompt = "Q:Which animal is the fastest?\nA:"
-    inputs = tokenizer(prompt, return_tensors="pt")
-
-    # model = AutoModelForCausalLM.from_pretrained("MyMoe1")
-    outputs = moe_model.generate(
-        **inputs,
-        max_new_tokens=100,
-        do_sample=False,
-        temperature=1,
-        top_k=None,
-        top_p=None
-    )
-
-    response = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    print(response)
-
-    outputs = base_model.generate(
-        **inputs,
-        max_new_tokens=100,
-        do_sample=False,
-        temperature=1,
-        top_k=None,
-        top_p=None
-    )
-
-    response = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    print(response)
-
-
+"""
+cd transformers
+pip install -e .
+pip install torch
+pip install libcst
+pip install ruff
+"""
