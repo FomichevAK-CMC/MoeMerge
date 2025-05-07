@@ -1,1 +1,32 @@
-# MoeMerge
+Установить версию transformers с гитхаба. (`pip install trnasformers` не установит необходимый `utils/modular_model_converter.py`)
+```
+git clone https://github.com/huggingface/transformers
+cd transformers
+pip install -e .
+```
+Зависимости:
+```
+pip install torch
+pip install libcst
+pip install ruff
+```
+
+Использование:
+```
+python moe_generator.py <spec.yaml> [--move_to_cwd]
+    <spec.yaml> - YAMl файл со спецификацией желаемой модели
+    [--move_to_cwd] - опциональный. Если указан - после генерации переместит
+                      директорию с моделинг файлами модели в текущую директорию,
+                      преобразовав относительные импорты в абсолютные.
+```
+Пример <spec.yaml>:
+```
+name: MyQwen2Moe
+attention: Qwen2.5-0.5B-Instruct
+experts:
+  - Qwen2.5-0.5B-Instruct
+  - Qwen2.5-0.5B-Instruct
+  - Qwen2.5-0.5B-Instruct
+num_experts_per_tok: 2
+moe_layers_idx: [21, 22, 23]
+```
