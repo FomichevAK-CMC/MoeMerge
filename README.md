@@ -1,4 +1,4 @@
-Установить версию transformers с гитхаба. (`pip install trnasformers` не установит необходимый `utils/modular_model_converter.py`)
+Установить версию transformers с гитхаба. (`pip install transformers` не установит необходимый `utils/modular_model_converter.py`)
 ```
 git clone https://github.com/huggingface/transformers
 cd transformers
