@@ -326,7 +326,7 @@ def run_generator(
     )
 
 def compare_models():
-
+    pass
 
 
 if __name__ == '__main__':
