@@ -3,7 +3,7 @@ import subprocess
 import torch
 import random
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoModel, PreTrainedModel
-from transformers import Qwen2Tokenizer, Qwen2Model, Qwen2ForCausalLM, PretrainedConfig
+from transformers import PretrainedConfig
 import os
 from pathlib import Path
 import inspect
