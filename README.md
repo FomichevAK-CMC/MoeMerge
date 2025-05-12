@@ -1,6 +1,9 @@
-Собирает MoE модель из базовых моделей-доноров. Генерирует modular и modeling-файлы, загружает веса в новую модель и сохраняет ее (config + tokenizer + model.safetensors).<br><br>**Чтобы использовать надо:**<br>
+Собирает MoE модель из базовых моделей-доноров. Генерирует modular и modeling-файлы, загружает веса в новую модель и сохраняет ее (config + tokenizer + model.safetensors).<br>
+Дефолтный роутер - рандомно выбирает k экспертов на токен.<br>
+
+**Чтобы использовать необходимо:**<br>
 Установить версию transformers с гитхаба. (`pip install transformers` не установит необходимый `utils/modular_model_converter.py`)<br>
-Дефолтный роутер - рандомно выбирает k экспертов на токен.
+
 
 ```
 git clone https://github.com/huggingface/transformers
